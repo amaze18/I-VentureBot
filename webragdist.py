@@ -15,26 +15,27 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.ingestion import IngestionPipeline
 from llama_index.core import ServiceContext
 from llama_index.core import VectorStoreIndex
-from llama_index.legacy.core.llms.types import ChatMessage, MessageRole
+from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.llms.openai import OpenAI
 from llama_index.core import StorageContext, load_index_from_storage
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.legacy import ServiceContext
-from llama_index.legacy.llms import OpenAI
-from llama_index.legacy.retrievers import BM25Retriever
-from llama_index.legacy.retrievers import VectorIndexRetriever
-from llama_index.legacy.retrievers import BaseRetriever
-from llama_index.legacy.chat_engine import CondensePlusContextChatEngine
-from llama_index.legacy.query_engine import RetrieverQueryEngine
-from llama_index.legacy.postprocessor import LongContextReorder
-from llama_index.legacy.schema import MetadataMode
-from llama_index.legacy.schema import QueryBundle
-from llama_index.legacy import (StorageContext,load_index_from_storage)
+from llama_index.llms.openai import OpenAI
+from llama_index.retrievers.bm25 import BM25Retriever
+from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.core.retrievers import BaseRetriever
+from llama_index.core.chat_engine import CondensePlusContextChatEngine
+from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.postprocessor import LongContextReorder
+from llama_index.core.schema import MetadataMode
+from llama_index.core.schema import QueryBundle
+from llama_index.core import (StorageContext,load_index_from_storage)
 import openai
+from llama_index.llms.groq import Groq
 # from openai import OpenAI
 import nest_asyncio
-
+from llama_index.llms.perplexity import Perplexity
 nest_asyncio.apply()
 
 
@@ -111,7 +112,7 @@ def indexgenerator(indexPath, documentsPath):
     return index
 
 
-indexPath = '/home/ubuntu/Indices/ada002_2000_only_txt_files_dlabs'
+indexPath = r'/home/ubuntu/Indices/dlabs-indices'
 documentsPath = ''
 index_2000 = indexgenerator(indexPath, documentsPath)
 
@@ -244,8 +245,8 @@ def answer_question(question,):
         return ""
 
 
-vector_retriever_2000 = VectorIndexRetriever(index=index_2000,similarity_top_k=3)
-bm25_retriever_2000 = BM25Retriever.from_defaults(index=index_2000, similarity_top_k=3)
+vector_retriever_2000 = VectorIndexRetriever(index=index_2000,similarity_top_k=2)
+bm25_retriever_2000 = BM25Retriever.from_defaults(index=index_2000, similarity_top_k=2)
 postprocessor = LongContextReorder()
 
 class HybridRetriever(BaseRetriever):
@@ -259,13 +260,7 @@ class HybridRetriever(BaseRetriever):
     def _retrieve(self, query, **kwargs):
         bm25_nodes_2000 = self.bm25_retriever_2000.retrieve(query, **kwargs)
         vector_nodes_2000 = self.vector_retriever_2000.retrieve(query, **kwargs)
-        encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
-        context_str = "\n\n".join([n.node.get_content(metadata_mode=MetadataMode.LLM).strip() for n in bm25_nodes_2000+vector_nodes_2000])
-        num_token =  len(encoding.encode(context_str))
-        if num_token > 10000: #3900 earlier
-            all_nodes = postprocessor.postprocess_nodes(nodes=bm25_nodes_2000+vector_nodes_2000,query_bundle=QueryBundle(query_str=prompt.lower()))
-        else:
-            all_nodes = bm25_nodes_2000+vector_nodes_2000
+        all_nodes = postprocessor.postprocess_nodes(nodes=bm25_nodes_2000+vector_nodes_2000,query_bundle=QueryBundle(query_str=query.lower()))
         return all_nodes
 hybrid_retriever=HybridRetriever(vector_retriever_2000,bm25_retriever_2000)
 
@@ -294,6 +289,18 @@ rouge = Rouge()
 #        )
 
 #new prompt
+import csv
+import os
+
+def append_to_csv(filename, data):
+    file_exists = os.path.isfile(filename)
+    with open(filename, 'a', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        if not file_exists:
+            writer.writerow(['Question', 'Context'])  # Write header if the file is newly created
+        writer.writerow(data)
+
+# Example usage:
 context_prompt = """
  You're an AI assistant to help students learn their course material via convertsations.
  The following is a friendly conversation between a user and an AI assistant for answering questions related to query.
@@ -307,54 +314,67 @@ context_prompt = """
 
 def get_response(prompt,message_history):
     # llm = OpenAI(model="gpt-3.5-turbo")
-    llm = OpenAI(model="gpt-4-1106-preview")
-    topk = 4
-    service_context = ServiceContext.from_defaults(llm=llm)
-    #query_engine=RetrieverQueryEngine.from_args(retriever=hybrid_retriever,service_context=service_context,verbose=True)
-    chat_engine=CondensePlusContextChatEngine.from_defaults(retriever=hybrid_retriever,service_context=service_context,chat_history=message_history,context_prompt=context_prompt,condense_prompt=condense_prompt)
-    nodes = hybrid_retriever.retrieve(prompt)
-    response = chat_engine.chat(str(prompt))
-    validating_prompt = ("""You are an intelligent bot designed to assist users on an organization's website by answering their queries. You'll be given a user's question and an associated answer. Your task is to determine if the provided answer effectively resolves the query. If the answer is unsatisfactory, return 0.\n
-                        Query: {question}  
-                        Answer: {answer}
-                        Your Feedback:
-                        """)
-    feedback = llm.complete(validating_prompt.format(question=prompt,answer=response.response))
-    if feedback.text==str(0):
-        st.write("DISTANCE APPROACH")
-        response , joined_text=answer_question(prompt)
-        scores = rouge.get_scores(response, joined_text)
-        message = {"role": "assistant", "content": response}
-       # st.session_state.messages.append(message)
-       # message_history.append(ChatMessage(role=MessageRole.ASSISTANT,content=str(response)),)
-        response_list = [response, prompt , scores]  
- #       df = pd.read_csv('logs/conversation_log.csv')
- #       new_row = {'Question': str(prompt), 'Answer': response,'Unigram_Recall' : scores[0]["rouge-1"]["r"],'Unigram_Precision' : scores[0]["rouge-1"]["p"],'Bigram_Recall' : scores[0]["rouge-2"]["r"],'Bigram_Precision' : scores[0]["rouge-2"]["r"]}
- #       df = pd.concat([df, pd.DataFrame(new_row, index=[0])], ignore_index=True)
- #       df.to_csv('logs/conversation_logs.csv', index=False)
- #       bucket = 'aiex' # already created on S3
- #       csv_buffer = StringIO()
- #       df.to_csv(csv_buffer)
- #       s3_resource= boto3.resource('s3',aws_access_key_id=os.environ['ACCESS_ID'],aws_secret_access_key= os.environ['ACCESS_KEY'])
- #       s3_resource.Object(bucket, 'conversation_log.csv').put(Body=csv_buffer.getvalue())  
-        return response_list                                 
-    else:
+    try:
+        prompt=f"{prompt} I-venture ISB"
+        pplx_api_key=""
+        groq_api=""
+    # llm = Perplexity(
+    # api_key=pplx_api_key, model="llama-2-70b-chat", temperature=0.2,api_base="https://api.perplexity.ai")
+        llm = Groq(model="llama3-70b-8192", api_key=groq_api)
+    #    llm = OpenAI(model="gpt-4-1106-preview")
+        topk =3
+    # service_context = ServiceContext.from_defaults(llm=llm)
+        #query_engine=RetrieverQueryEngine.from_args(retriever=hybrid_retriever,service_context=service_context,verbose=True)
+        chat_engine=CondensePlusContextChatEngine.from_defaults(retriever=hybrid_retriever,llm=llm,chat_history=message_history,context_prompt=context_prompt,condense_prompt=condense_prompt)
+        nodes = hybrid_retriever.retrieve(prompt)
         context_str = "\n\n".join([n.node.get_content(metadata_mode=MetadataMode.LLM).strip() for n in nodes])
-        scores=rouge.get_scores(response.response,context_str)
-       # message = {"role": "assistant", "content": response.response}
-       # st.session_state.messages.append(message)
-       # message_history.append(ChatMessage(role=MessageRole.ASSISTANT,content=str(response.response)),)
-        response_list = [response.response , prompt , scores]
-#        df = pd.read_csv('logs/conversation_logs.csv')
-#        new_row = {'Question': str(prompt), 'Answer': response.response,'Unigram_Recall' : scores[0]["rouge-1"]["r"],'Unigram_Precision' : scores[0]["rouge-1"]["p"],'Bigram_Recall' : scores[0]["rouge-2"]["r"],'Bigram_Precision' : scores[0]["rouge-2"]["r"]}
-#        df = pd.concat([df, pd.DataFrame(new_row, index=[0])], ignore_index=True)
-#        df.to_csv('logs/conversation_logs.csv', index=False)
-#        bucket = 'aiex' # already created on S3
-#        csv_buffer = StringIO()
-#        df.to_csv(csv_buffer)
-#        s3_resource= boto3.resource('s3',aws_access_key_id=os.environ['ACCESS_ID'],aws_secret_access_key=os.environ['ACCESS_KEY'])
-#        s3_resource.Object(bucket, 'conversation_log.csv').put(Body=csv_buffer.getvalue())
-        return response_list 
+        append_to_csv("context.csv",[prompt,context_str])
+        response = chat_engine.chat(str(prompt))
+        validating_prompt = ("""You are an intelligent bot designed to assist users on an organization's website by answering their queries. You'll be given a user's question and an associated answer. Your task is to determine if the provided answer effectively resolves the query. If the answer is unsatisfactory, return 0.\n
+                            Query: {question}  
+                            Answer: {answer}
+                            Your Feedback:
+                            """)
+        feedback = llm.complete(validating_prompt.format(question=prompt,answer=response.response))
+        if feedback.text==str(0):
+            st.write("DISTANCE APPROACH")
+            response , joined_text=answer_question(prompt)
+            scores = rouge.get_scores(response, joined_text)
+            message = {"role": "assistant", "content": response}
+        # st.session_state.messages.append(message)
+        # message_history.append(ChatMessage(role=MessageRole.ASSISTANT,content=str(response)),)
+            response_list = [response, prompt , scores]  
+    #       df = pd.read_csv('logs/conversation_log.csv')
+    #       new_row = {'Question': str(prompt), 'Answer': response,'Unigram_Recall' : scores[0]["rouge-1"]["r"],'Unigram_Precision' : scores[0]["rouge-1"]["p"],'Bigram_Recall' : scores[0]["rouge-2"]["r"],'Bigram_Precision' : scores[0]["rouge-2"]["r"]}
+    #       df = pd.concat([df, pd.DataFrame(new_row, index=[0])], ignore_index=True)
+    #       df.to_csv('logs/conversation_logs.csv', index=False)
+    #       bucket = 'aiex' # already created on S3
+    #       csv_buffer = StringIO()
+    #       df.to_csv(csv_buffer)
+    #       s3_resource= boto3.resource('s3',aws_access_key_id=os.environ['ACCESS_ID'],aws_secret_access_key= os.environ['ACCESS_KEY'])
+    #       s3_resource.Object(bucket, 'conversation_log.csv').put(Body=csv_buffer.getvalue())  
+            return response_list                                 
+        else:
+            context_str = "\n\n".join([n.node.get_content(metadata_mode=MetadataMode.LLM).strip() for n in nodes])
+        # st.write(context_str)
+            scores=rouge.get_scores(response.response,context_str)
+        # message = {"role": "assistant", "content": response.response}
+        # st.session_state.messages.append(message)
+        # message_history.append(ChatMessage(role=MessageRole.ASSISTANT,content=str(response.response)),)
+        # append_to_csv(prompt,context_str)
+            response_list = [response.response , prompt , scores]
+    #        df = pd.read_csv('logs/conversation_logs.csv')
+    #        new_row = {'Question': str(prompt), 'Answer': response.response,'Unigram_Recall' : scores[0]["rouge-1"]["r"],'Unigram_Precision' : scores[0]["rouge-1"]["p"],'Bigram_Recall' : scores[0]["rouge-2"]["r"],'Bigram_Precision' : scores[0]["rouge-2"]["r"]}
+    #        df = pd.concat([df, pd.DataFrame(new_row, index=[0])], ignore_index=True)
+    #        df.to_csv('logs/conversation_logs.csv', index=False)
+    #        bucket = 'aiex' # already created on S3
+    #        csv_buffer = StringIO()
+    #        df.to_csv(csv_buffer)
+    #        s3_resource= boto3.resource('s3',aws_access_key_id=os.environ['ACCESS_ID'],aws_secret_access_key=os.environ['ACCESS_KEY'])
+    #        s3_resource.Object(bucket, 'conversation_log.csv').put(Body=csv_buffer.getvalue())
+            return response_list 
+    except:
+        print("error")
 
 def chat():
     if "messages" not in st.session_state.keys(): # Initialize the chat message history
@@ -373,63 +393,151 @@ def chat():
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
                     prompt = st.session_state.messages[-1]["content"]
-                    response_content = get_response(prompt=prompt,message_history=st.session_state.message_history)
-                    st.write(response_content[0])
+                    try:
+                        response_content = get_response(prompt=f"{prompt} I-venture ISB",message_history=st.session_state.message_history)
+                        st.write(response_content[0])
 
-                # st.write("hello")
-                    st.session_state.message_history.append(ChatMessage(role=MessageRole.ASSISTANT,content=str(response_content[0])))
+                    # st.write("hello")
+                        # st.session_state.message_history.append(ChatMessage(role=MessageRole.ASSISTANT,content=str(response_content[0])))
                 # with st.chat_message("assistant"):
-                    with st.spinner("Searching the web..."):
-                    # if st.button("Enhance answer"):
-                    # raise ValueError("This is an error message.")
-                        llm = OpenAI(model="gpt-4-1106-preview") 
-                        service_context = ServiceContext.from_defaults(llm=llm)
-                            
-                        prompt = st.session_state.messages[-1]["content"]
-    #                    st.write("hello")
-                        messages = [
-                            {
-                                    "role": "user",
-                                "content": prompt,
-                            },
-                            ]
-    #                   st.write(messages)
-    #                   st.session_state.messages.append({"role": "user", "content": prompt}) 
-                        modified_messages = []
-                        for message in messages:
-                            if message["role"] == "user":
-                                    modified_message = {"role": "user", "content": f"{message['content']} I-venture ISB"}
-                            else:
-                                    modified_message = message
-                            modified_messages.append(modified_message)
+                        with st.spinner("Searching the web..."):
+                        # if False:
+                        # raise ValueError("This is an error message.")
+                            groq_api=""
+                            llm = OpenAI(model="gpt-4-1106-preview") 
+                            #llm = Groq(model="llama3-70b-8192", api_key=groq_api)
+                            #service_context = ServiceContext.from_defaults(llm=llm)
+                                
+                            prompt = st.session_state.messages[-1]["content"]
+        #                    st.write("hello")
+                            messages = [
+                                {
+                                        "role": "user",
+                                    "content": prompt,
+                                },
+                                ]
+        #                   st.write(messages)
+        #                   st.session_state.messages.append({"role": "user", "content": prompt}) 
+                            modified_messages = []
+                            for message in messages:
+                                if message["role"] == "user":
+                                        modified_message = {"role": "user", "content": f"{message['content']} I-venture ISB"}
+                                else:
+                                        modified_message = message
+                                modified_messages.append(modified_message)
 
-                        st.session_state.message_history.append(ChatMessage(role=MessageRole.USER, content=prompt))
+                            # st.session_state.message_history.append(ChatMessage(role=MessageRole.USER, content=prompt))
 
-                        #    with st.chat_message("assistant"):
-                        #       with st.spinner("Thinking..."):
-                        client = openai.OpenAI(api_key="", base_url="https://api.perplexity.ai")
-                        response = client.chat.completions.create(
-                                    model="llama-3-sonar-large-32k-online",
-                                    messages=modified_messages,
-                                    )   
-                        web_content = response.choices[0].message.content
-                        query_engine=CondensePlusContextChatEngine.from_defaults(retriever=hybrid_retriever,service_context=service_context,chat_history=st.session_state.message_history,context_prompt=DEFAULT_CONTEXT_PROMPT_TEMPLATE_1,condense_prompt=condense_prompt)
-                        enhanced_response = query_engine.chat(f"{prompt} web response:{web_content}")
-    #                    st.write(web_content)
-        #               enhanced_response = CondensePlusContextChatEngine.from_defaults(
-        #                       query_engine,
-    #                        context_prompt=DEFAULT_CONTEXT_PROMPT_TEMPLATE_1,
-    #                         condense_prompt=condense_prompt,
-    #                        chat_history=st.session_state.message_history
-    #                    ).chat(f"{prompt} {web_content}")
-    #                        enhanced_response_content = enhanced_response.response if hasattr(enhanced_response, 'response') else str(enhanced_response)
+                            #    with st.chat_message("assistant"):
+                            #       with st.spinner("Thinking..."):
+                            client = openai.OpenAI(api_key="", base_url="https://api.perplexity.ai")
+                            response = client.chat.completions.create(
+                                        model="llama-3-sonar-large-32k-online",
+                                        messages=modified_messages,
+                                        )   
+                            web_content = response.choices[0].message.content
+                            query_engine=CondensePlusContextChatEngine.from_defaults(retriever=hybrid_retriever,llm=llm,chat_history=st.session_state.message_history,context_prompt=DEFAULT_CONTEXT_PROMPT_TEMPLATE_1,condense_prompt=condense_prompt)
+                            enhanced_response = query_engine.chat(f"{prompt} web response:{web_content}")
+        #                    st.write(web_content)
+            #               enhanced_response = CondensePlusContextChatEngine.from_defaults(
+            #                       query_engine,
+        #                        context_prompt=DEFAULT_CONTEXT_PROMPT_TEMPLATE_1,
+        #                         condense_prompt=condense_prompt,
+        #                        chat_history=st.session_state.message_history
+        #                    ).chat(f"{prompt} {web_content}")
+        #                        enhanced_response_content = enhanced_response.response if hasattr(enhanced_response, 'response') else str(enhanced_response)
 
-                            # st.session_state.message_history.append(ChatMessage(role=MessageRole.USER, content=user_input))
-                        st.session_state.messages.append({"role": "assistant", "content": f"{response_content[0]}\n\n Enhanced Answer:\n {enhanced_response.response}"})
-                        st.session_state.message_history.append(ChatMessage(role=MessageRole.ASSISTANT, content=enhanced_response.response))
-    #
-                        st.write("Enhanced Answer: ")
-                        st.write(enhanced_response.response)
+                                # st.session_state.message_history.append(ChatMessage(role=MessageRole.USER, content=user_input))
+                            st.session_state.messages.append({"role": "assistant", "content": f"{response_content[0]}\n\n Enhanced Answer:\n {enhanced_response.response}"})
+                            st.session_state.message_history.append(ChatMessage(role=MessageRole.ASSISTANT, content=f"{response_content[0]}\n {enhanced_response.response}"))
+        #
+                            st.write("Enhanced Answer: ")
+                            st.write(enhanced_response.response)
+                    except:
+                        try:
+                            with st.spinner("Searching the web..."):
+                            # if False:
+                            # raise ValueError("This is an error message.")
+                                groq_api=""
+                                llm = OpenAI(model="gpt-4-1106-preview") 
+                                #llm = Groq(model="llama3-70b-8192", api_key=groq_api)
+                                #service_context = ServiceContext.from_defaults(llm=llm)
+                                    
+                                prompt = st.session_state.messages[-1]["content"]
+            #                    st.write("hello")
+                                messages = [
+                                    {
+                                            "role": "user",
+                                        "content": prompt,
+                                    },
+                                    ]
+            #                   st.write(messages)
+            #                   st.session_state.messages.append({"role": "user", "content": prompt}) 
+                                modified_messages = []
+                                for message in messages:
+                                    if message["role"] == "user":
+                                            modified_message = {"role": "user", "content": f"{message['content']} I-venture ISB"}
+                                    else:
+                                            modified_message = message
+                                    modified_messages.append(modified_message)
+
+                                # st.session_state.message_history.append(ChatMessage(role=MessageRole.USER, content=prompt))
+
+                                #    with st.chat_message("assistant"):
+                                #       with st.spinner("Thinking..."):
+                                client = openai.OpenAI(api_key="", base_url="https://api.perplexity.ai")
+                                response = client.chat.completions.create(
+                                            model="llama-3-sonar-large-32k-online",
+                                            messages=modified_messages,
+                                            )   
+                                web_content = response.choices[0].message.content
+                                query_engine=CondensePlusContextChatEngine.from_defaults(retriever=hybrid_retriever,llm=llm,chat_history=st.session_state.message_history,context_prompt=DEFAULT_CONTEXT_PROMPT_TEMPLATE_1,condense_prompt=condense_prompt)
+                                enhanced_response = query_engine.chat(f"{prompt} web response:{web_content}")
+            #                    st.write(web_content)
+                #               enhanced_response = CondensePlusContextChatEngine.from_defaults(
+                #                       query_engine,
+            #                        context_prompt=DEFAULT_CONTEXT_PROMPT_TEMPLATE_1,
+            #                         condense_prompt=condense_prompt,
+            #                        chat_history=st.session_state.message_history
+            #                    ).chat(f"{prompt} {web_content}")
+            #                        enhanced_response_content = enhanced_response.response if hasattr(enhanced_response, 'response') else str(enhanced_response)
+
+                                    # st.session_state.message_history.append(ChatMessage(role=MessageRole.USER, content=user_input))
+                                st.session_state.messages.append({"role": "assistant", "content": f"{response_content[0]}\n\n Enhanced Answer:\n {enhanced_response.response}"})
+                                st.session_state.message_history.append(ChatMessage(role=MessageRole.ASSISTANT, content=enhanced_response.response))
+            #
+                                st.write("Enhanced Answer: ")
+                                st.write(enhanced_response.response)
+                        except:
+                            with st.spinner("Searching the web..."):
+                                messages = [
+                                    {
+                                            "role": "user",
+                                        "content": prompt,
+                                    },
+                                    ]
+            #                   st.write(messages)
+            #                   st.session_state.messages.append({"role": "user", "content": prompt}) 
+                                modified_messages = []
+                                for message in messages:
+                                    if message["role"] == "user":
+                                            modified_message = {"role": "user", "content": f"{message['content']} I-venture ISB"}
+                                    else:
+                                            modified_message = message
+                                    modified_messages.append(modified_message)
+                                # st.session_state.message_history.append(ChatMessage(role=MessageRole.USER, content=prompt))
+
+                                #    with st.chat_message("assistant"):
+                                #       with st.spinner("Thinking..."):
+                                client = openai.OpenAI(api_key="", base_url="https://api.perplexity.ai")
+                                response = client.chat.completions.create(
+                                            model="llama-3-sonar-large-32k-online",
+                                            messages=modified_messages,
+                                            )   
+                                web_content = response.choices[0].message.content
+                                st.session_state.message_history.append(ChatMessage(role=MessageRole.ASSISTANT, content=str(web_content)))
+                                st.write(str(web_content))
+
 def main():
     st.title("I-Venture @ ISB Chatbot")
     chat()
