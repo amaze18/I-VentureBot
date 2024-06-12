@@ -109,10 +109,12 @@ with st.sidebar:
 
 indexPath_2000=r"Indices/dlabs-indices/updated_data_index"
 documentsPath_2000=r"striped_new"
+#loading index
 index_2000=indexgenerator(indexPath_2000,documentsPath_2000)
-vector_retriever_2000 = VectorIndexRetriever(index=index_2000,similarity_top_k=3,embed_model=OpenAIEmbedding(model="text-embedding-ada-002"))
-bm25_retriever_2000 = BM25Retriever.from_defaults(index=index_2000,similarity_top_k=3)
+vector_retriever_2000 = VectorIndexRetriever(index=index_2000,similarity_top_k=2,embed_model=OpenAIEmbedding(model="text-embedding-ada-002"))
+bm25_retriever_2000 = BM25Retriever.from_defaults(index=index_2000,similarity_top_k=2)
 postprocessor = LongContextReorder()
+#hybrid retriever
 class HybridRetriever(BaseRetriever):
     def __init__(self, vector_retriever, bm25_retriever):
         self.vector_retriever = vector_retriever
@@ -151,17 +153,23 @@ condense_prompt = (
 #Relaxed prompt with language identification, ans in form of bullet points or short paragraphs
 
 
+RAG_PROMPT_TEMPLATE = """
+You are an artificial intelligence assistant designed to help answer questions related to I-Venture at ISB or DLabs ISB.
+The following is a friendly conversation between a user and an AI assistant for answering questions related to query.
+The assistant is talkative and provides lots of specific details in form of bullet points or short paras from the context.
+Here is the relevant context:
 
-context_prompt=(
-        "You are a helpful and friendly chatbot who addresses queries in detail and bulleted points regarding I-Venture @ ISB."
-        "Here are the relevant documents for the context:\n"
-        "{context_str}"
-        "\nInstruction: Use the previous chat history above and context, to interact and help the user. Never give any kinds of links, email addresses or contact numbers in the answer."
-        )
 
+{context_str}
+
+
+Instruction: Based on the above context and web reponse giving more weightage to the web response , provide a detailed answer IN THE USER'S LANGUAGE with logical formation of paragraphs for the user question below.
+"""
+#RAG +Distance approach
 def get_response(prompt,message_history):
-    llm_chat = Groq(model="llama3-70b-8192", api_key="API_KEY")
-    chat_engine=CondensePlusContextChatEngine.from_defaults(llm=llm_chat,retriever=hybrid_retriever,chat_history=message_history,context_prompt=context_prompt,condense_prompt=condense_prompt,streaming=True)
+    #RAG
+    llm_chat = OpenAI(model="gpt-3.5-turbo",temperature=0)
+    chat_engine=CondensePlusContextChatEngine.from_defaults(llm=llm_chat,retriever=hybrid_retriever,chat_history=message_history,context_prompt=RAG_PROMPT_TEMPLATE,condense_prompt=condense_prompt,streaming=True)
     nodes = hybrid_retriever.retrieve(prompt.lower())
     response = chat_engine.chat(str(prompt.lower()))
     context_str = "\n\n".join([n.node.get_content(metadata_mode=MetadataMode.LLM).strip() for n in response.source_nodes])
@@ -169,9 +177,10 @@ def get_response(prompt,message_history):
                            Query: {question}  
                            Answer: {answer}
                            Your Feedback:"""
-                        
+     #check for  RAG fail                   
     feedback = OpenAI(model="gpt-3.5-turbo").complete(validating_prompt.format(question=prompt,answer=response.response))
     if feedback.text==str(0): #feedback.text
+        #distance approach
         st.write("DISTANCE APPROACH")
         response , joined_text=answer_question(prompt.lower())
         scores = rouge.get_scores(response, joined_text)
@@ -189,8 +198,9 @@ def get_response(prompt,message_history):
         #s3_resource= boto3.resource('s3',aws_access_key_id=os.environ['ACCESS_ID'],aws_secret_access_key= os.environ['ACCESS_KEY'])
         #s3_resource.Object(bucket, 'conversation_log.csv').put(Body=csv_buffer.getvalue()) 
         #st.write(joined_text) 
-        return response_list                                 
+        return response_list , joined_text                              
     else:
+        #If RAG didn't fail
         context_str = "\n\n".join([n.node.get_content(metadata_mode=MetadataMode.LLM).strip() for n in nodes])
         scores=rouge.get_scores(response.response,context_str)
         message = {"role": "assistant", "content": response.response}
@@ -206,17 +216,21 @@ def get_response(prompt,message_history):
         #df.to_csv(csv_buffer)
         #s3_resource= boto3.resource('s3',aws_access_key_id=os.environ['ACCESS_ID'],aws_secret_access_key=os.environ['ACCESS_KEY'])
         #s3_resource.Object(bucket, 'conversation_log.csv').put(Body=csv_buffer.getvalue())
-        return response_list 
+        return response_list , context_str
 
 
-
-def get_web_answer(question):
-    client = openai.OpenAI(api_key="API_KEY", base_url="https://api.perplexity.ai")
+#Web+RAG
+def get_web_answer(question,context_from_rag):
+    #Using web+RAG
+    client = openai.OpenAI(api_key="pplx_API_KEY", base_url="https://api.perplexity.ai")
     prompt = (
-        "You are a helpful and friendly chatbot who addresses queries in detail and bulleted points regarding I-Venture @ ISB."
-        "You get relevant context from the internet."
+        "You are a helpful and friendly chatbot who addresses queries in detail and bulleted points regarding I-Venture @ ISB.\n"
         "Here's the question:\n"
-        f"{question}"+ "I-Venture ISB"
+        f"{question}"+ " I-Venture ISB\n"
+        "Here's the relevant information.\n"
+        f"{context_from_rag}\n"
+        "If the relevant information is inadequate use web sources as your information pool.\n"
+        "Rely heavily on information recieved from the web.\n"
         "Instruction: Respectfully decline to answer any questions that are not related to I-Venture @ ISB."
         )
     messages = [{"role":"user","content": prompt}]
@@ -240,11 +254,20 @@ for message in st.session_state.messages: # Display the prior chat messages
 # If last message is not from assistant, generate a new response
 if st.session_state.messages[-1]["role"] != "assistant":
         with st.chat_message("assistant"):
-            with st.spinner("RAG Answer..."):
-                st.write("RAG Answer")
-                response = get_response(prompt=prompt,message_history=st.session_state.message_history)
-                st.write(response[0])
-            with st.spinner("Web Answer.."):
-                st.write("WEB Answer")
-                web_answer = get_web_answer(prompt)
-                st.write(web_answer)
+            try:
+                #Checking if RAG or distance approach gives a answer
+                with st.spinner("RAG Answer..."):
+                    st.write("RAG Answer")
+                    response , context_from_rag = get_response(prompt=prompt,message_history=st.session_state.message_history)
+                    st.write(response[0])
+                #Web answer
+                with st.spinner("Web Answer.."):
+                    st.write("WEB Answer")
+                    web_answer = get_web_answer(prompt,context_from_rag)
+                    st.write(web_answer)
+            except:
+                #Printing only web answer
+                with st.spinner("Web Answer.."):
+                    st.write("WEB Answer")
+                    web_answer = get_web_answer(prompt,context_from_rag)
+                    st.write(web_answer)
